@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useRef, useEffect } from "react";
+import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   ResponsiveContainer,
   BarChart,
@@ -128,39 +128,6 @@ export default function BudgetTracker() {
     }
   }, [entries, incomes, bankBalance]);
 
-  // Auto-credit income on matching date (monthly recurring)
-  useEffect(() => {
-    const todayStr = today();
-    const [, , dayOfMonth] = todayStr.split('-');
-    const currentMonth = todayStr.slice(0, 7); // YYYY-MM
-    
-    // Only process incomes that need checking
-    const toCredit = incomes.filter(inc => 
-      inc.autoAdd && 
-      (inc.lastCreditedMonth || '') !== currentMonth &&
-      inc.date.split('-')[2] === dayOfMonth
-    );
-    
-    if (toCredit.length > 0) {
-      const totalToCredit = toCredit.reduce((s, i) => s + (parseFloat(i.amount) || 0), 0);
-      
-      setBankBalance(prev => {
-        const current = parseFloat(prev) || 0;
-        const newBalance = current + totalToCredit;
-        console.log(`[auto-credit] Credited ₹${totalToCredit}, new balance: ${newBalance}`);
-        return String(newBalance);
-      });
-      
-      setIncomes(prev => prev.map(inc => 
-        toCredit.find(t => t.id === inc.id) 
-          ? { ...inc, lastCreditedMonth: currentMonth }
-          : inc
-      ));
-      
-      showNotif(`Auto income credited: ₹${totalToCredit}`, 'success');
-    }
-  }, [incomes]); // Re-check when incomes list changes
-
   const totalExpenses = useMemo(() => {
     return entries.reduce((sum, e) => sum + (e.total || 0), 0);
   }, [entries]);
@@ -263,49 +230,184 @@ export default function BudgetTracker() {
   const exportToExcel = useCallback(() => {
     try {
       const wb = XLSX.utils.book_new();
+
+      // Entries sheet
       const entriesSheetData = entries.map(e => {
-        const base = { date: e.date, note: e.note || "", total: Number(e.total || 0) };
+        const base = { id: e.id, date: new Date(e.date), note: e.note || "", total: Number(e.total || 0) };
         EXPENSE_CATEGORIES.forEach(c => { base[c.label] = Number(parseFloat(e[c.key] || 0) || 0); });
+        if (e.subList) base.subscriptions = JSON.stringify(e.subList);
+        if (e.otherList) base.otherItems = JSON.stringify(e.otherList);
         return base;
       });
-      const es = XLSX.utils.json_to_sheet(entriesSheetData);
+      const es = XLSX.utils.json_to_sheet(entriesSheetData, { dateNF: 'yyyy-mm-dd' });
+
+      // Styling: header fill + text color, tight column widths, date/currency formats, hide unused rows
       try {
-        const rng = XLSX.utils.decode_range(es['!ref']);
-        for (let C = rng.s.c; C <= rng.e.c; ++C) {
-          const cell = es[XLSX.utils.encode_cell({ c: C, r: rng.s.r })];
-          if (cell) cell.s = { font: { bold: true, color: { rgb: 'FFFFFFFF' } }, fill: { patternType: 'solid', fgColor: { rgb: 'FF6366F1' } }, alignment: { horizontal: 'center' } };
-        }
-        const catSet = new Set(EXPENSE_CATEGORIES.map(c => c.label));
-        for (let R = rng.s.r + 1; R <= rng.e.r; ++R) {
-          for (let C = rng.s.c; C <= rng.e.c; ++C) {
-            const cell = es[XLSX.utils.encode_cell({ c: C, r: R })];
-            if (!cell) continue;
-            const col = es[XLSX.utils.encode_cell({ c: C, r: rng.s.r })];
-            const colName = col ? String(col.v || '') : '';
-            if (colName === 'total' || catSet.has(colName)) { cell.t = 'n'; cell.v = Number(cell.v || 0); cell.z = '₹#,##0'; }
-            if (colName === 'date') { if (typeof cell.v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(cell.v)) { cell.t = 'd'; cell.z = 'yyyy-mm-dd'; } }
+        const range = XLSX.utils.decode_range(es['!ref']);
+        const headers = [];
+
+        // collect max width per column (including header)
+        const maxLens = [];
+        for (let C = range.s.c; C <= range.e.c; ++C) {
+          const hdrCell = es[XLSX.utils.encode_cell({ c: C, r: range.s.r })];
+          const hdr = hdrCell ? String(hdrCell.v) : '';
+          headers.push(hdr);
+          maxLens[C] = hdr.length;
+          // style header: bold, centered, fill and font color
+          if (hdrCell) {
+            hdrCell.s = hdrCell.s || {};
+            hdrCell.s.font = { ...(hdrCell.s.font || {}), bold: true, color: { rgb: 'FFFFFFFF' } };
+            hdrCell.s.fill = { patternType: 'solid', fgColor: { rgb: 'FF6366F1' } };
+            hdrCell.s.alignment = { horizontal: 'center', vertical: 'center' };
           }
         }
+
+        // scan data rows to compute content widths and apply formatting
+        const categoryHeaderSet = new Set(EXPENSE_CATEGORIES.map(c => c.label));
+        const thinBorder = { style: 'thin', color: { rgb: 'FFD3D3D3' } };
+        const borders = { left: thinBorder, right: thinBorder, top: thinBorder, bottom: thinBorder };
+        
+        for (let C = range.s.c; C <= range.e.c; ++C) {
+          for (let R = range.s.r + 1; R <= range.e.r; ++R) {
+            const cellRef = XLSX.utils.encode_cell({ c: C, r: R });
+            const cell = es[cellRef];
+            if (!cell) continue;
+            // determine string representation length
+            const str = (cell.v === null || cell.v === undefined) ? '' : String(cell.v);
+            maxLens[C] = Math.max(maxLens[C] || 0, str.length);
+
+            const hdr = headers[C - range.s.c] || '';
+            cell.s = cell.s || {};
+            
+            // Add borders and alternating row colors
+            cell.s.border = borders;
+            if (R % 2 === 0) {
+              cell.s.fill = { patternType: 'solid', fgColor: { rgb: 'FFF5F5F5' } }; // light gray
+            }
+            
+            // Date column -> keep as date format
+            if (hdr && hdr.toLowerCase().includes('date')) {
+              // if stored as JS Date object, set type d
+              if (cell.v instanceof Date) { cell.t = 'd'; cell.z = 'yyyy-mm-dd'; }
+              else if (!isNaN(Date.parse(cell.v))) { cell.t = 'd'; cell.v = new Date(cell.v); cell.z = 'yyyy-mm-dd'; }
+              cell.s.alignment = { horizontal: 'center', vertical: 'center' };
+            }
+            // Currency columns: total and any category labels
+            else if (hdr === 'total' || categoryHeaderSet.has(hdr)) {
+              cell.t = 'n';
+              cell.v = Number(cell.v || 0);
+              cell.z = '₹#,##0.00'; // with decimals
+              cell.s.alignment = { horizontal: 'right', vertical: 'center' };
+            }
+            // Text columns
+            else {
+              cell.s.alignment = { horizontal: 'left', vertical: 'center' };
+            }
+          }
+        }
+        
+        // Add borders to header row
+        for (let C = range.s.c; C <= range.e.c; ++C) {
+          const hdrCell = es[XLSX.utils.encode_cell({ c: C, r: range.s.r })];
+          if (hdrCell) {
+            hdrCell.s.border = borders;
+            hdrCell.s.alignment = { horizontal: 'center', vertical: 'center', wrapText: true };
+          }
+        }
+        
+        // Set row heights
+        es['!rows'] = es['!rows'] || [];
+        es['!rows'][range.s.r] = { hpx: 30 }; // header row height
+        for (let R = range.s.r + 1; R <= range.e.r; ++R) {
+          es['!rows'][R] = { hpx: 25 }; // data row height
+        }
+
+        // set column widths tightly based on max content length (min 8, max 30)
         es['!cols'] = [];
-        for (let C = rng.s.c; C <= rng.e.c; ++C) es['!cols'].push({ wch: 14 });
+        for (let C = range.s.c; C <= range.e.c; ++C) {
+          const len = Math.max(8, Math.min(30, (maxLens[C] || 8) + 2));
+          es['!cols'].push({ wch: len });
+        }
+
+        // hide a small number of rows immediately after data to keep sheet visually compact
+        const lastRow = range.e.r;
+        const hideFrom = lastRow + 1;
+        const hideTo = Math.min(lastRow + 500, 2000);
+        for (let r = hideFrom; r <= hideTo; ++r) { es['!rows'][r] = { hidden: true }; }
+
+        // freeze header row
         es['!freeze'] = { xSplit: 0, ySplit: 1 };
-      } catch (e) { console.warn('entries format:', e); }
+      } catch (e) {
+        console.warn('Styling skipped:', e);
+      }
+
       XLSX.utils.book_append_sheet(wb, es, "Entries");
+
+      // Category totals sheet
       const categoryRows = EXPENSE_CATEGORIES.map(c => ({ Category: c.label, Total: Number(categoryTotals[c.key] || 0) }));
       const cs = XLSX.utils.json_to_sheet(categoryRows);
       try {
-        const rng2 = XLSX.utils.decode_range(cs['!ref']);
-        for (let C = rng2.s.c; C <= rng2.e.c; ++C) {
-          const cell = cs[XLSX.utils.encode_cell({ c: C, r: rng2.s.r })];
-          if (cell) cell.s = { font: { bold: true, color: { rgb: 'FFFFFFFF' } }, fill: { patternType: 'solid', fgColor: { rgb: 'FF6366F1' } }, alignment: { horizontal: 'center' } };
+        const r = XLSX.utils.decode_range(cs['!ref']);
+        // header styling with fill + white font
+        for (let C = r.s.c; C <= r.e.c; ++C) {
+          const h = cs[XLSX.utils.encode_cell({ c: C, r: r.s.r })];
+          if (h) {
+            h.s = h.s || {};
+            h.s.font = { ...(h.s.font || {}), bold: true, color: { rgb: 'FFFFFFFF' } };
+            h.s.fill = { patternType: 'solid', fgColor: { rgb: 'FF6366F1' } };
+            h.s.alignment = { horizontal: 'center' };
+          }
         }
-        for (let R = rng2.s.r + 1; R <= rng2.e.r; ++R) {
-          const cell = cs[XLSX.utils.encode_cell({ c: rng2.s.c + 1, r: R })];
-          if (cell) { cell.t = 'n'; cell.v = Number(cell.v || 0); cell.z = '₹#,##0'; }
+        // compute column widths based on content
+        const maxLens = [];
+        for (let C = r.s.c; C <= r.e.c; ++C) {
+          for (let R = r.s.r; R <= r.e.r; ++R) {
+            const cell = cs[XLSX.utils.encode_cell({ c: C, r: R })];
+            if (!cell) continue;
+            const len = String(cell.v || '').length;
+            maxLens[C] = Math.max(maxLens[C] || 0, len);
+          }
         }
-        cs['!cols'] = [{ wch: 20 }, { wch: 14 }];
-      } catch (e) { console.warn('category format:', e); }
+        cs['!cols'] = [];
+        for (let C = r.s.c; C <= r.e.c; ++C) cs['!cols'].push({ wch: Math.max(8, Math.min(30, (maxLens[C] || 8) + 2)) });
+
+        // format Total column as currency with borders and alternating colors
+        const thinBorder2 = { style: 'thin', color: { rgb: 'FFD3D3D3' } };
+        const borders2 = { left: thinBorder2, right: thinBorder2, top: thinBorder2, bottom: thinBorder2 };
+        for (let R = r.s.r; R <= r.e.r; ++R) {
+          for (let C = r.s.c; C <= r.e.c; ++C) {
+            const cellRef = XLSX.utils.encode_cell({ c: C, r: R });
+            const cell = cs[cellRef];
+            if (!cell) continue;
+            cell.s = cell.s || {};
+            cell.s.border = borders2;
+            if (R > r.s.r && R % 2 === 0) {
+              cell.s.fill = { patternType: 'solid', fgColor: { rgb: 'FFF5F5F5' } };
+            }
+            if (C === r.s.c + 1 && R > r.s.r) {
+              cell.t = 'n';
+              cell.v = Number(cell.v || 0);
+              cell.z = '₹#,##0.00';
+              cell.s.alignment = { horizontal: 'right', vertical: 'center' };
+            } else if (R > r.s.r) {
+              cell.s.alignment = { horizontal: 'left', vertical: 'center' };
+            } else {
+              cell.s.alignment = { horizontal: 'center', vertical: 'center' };
+            }
+          }
+        }
+        cs['!rows'] = cs['!rows'] || [];
+        cs['!rows'][r.s.r] = { hpx: 30 };
+        for (let R = r.s.r + 1; R <= r.e.r; ++R) cs['!rows'][R] = { hpx: 25 };
+
+        // hide extra rows after data
+        const lastRow = r.e.r;
+        cs['!rows'] = cs['!rows'] || [];
+        for (let rr = lastRow + 1; rr <= lastRow + 200; ++rr) cs['!rows'][rr] = { hidden: true };
+      } catch (e) { console.warn('Category styling skipped', e); }
       XLSX.utils.book_append_sheet(wb, cs, "Category Totals");
+
+      // Summary sheet
       const summary = [
         { Metric: "Total Expenses", Value: totalExpenses },
         { Metric: "This Month Total", Value: thisMonthTotal },
@@ -317,24 +419,83 @@ export default function BudgetTracker() {
       ];
       const ss = XLSX.utils.json_to_sheet(summary);
       try {
-        const rng3 = XLSX.utils.decode_range(ss['!ref']);
-        for (let C = rng3.s.c; C <= rng3.e.c; ++C) {
-          const cell = ss[XLSX.utils.encode_cell({ c: C, r: rng3.s.r })];
-          if (cell) cell.s = { font: { bold: true, color: { rgb: 'FFFFFFFF' } }, fill: { patternType: 'solid', fgColor: { rgb: 'FF6366F1' } }, alignment: { horizontal: 'center' } };
+        const rr = XLSX.utils.decode_range(ss['!ref']);
+        // header styling
+        for (let C = rr.s.c; C <= rr.e.c; ++C) {
+          const h = ss[XLSX.utils.encode_cell({ c: C, r: rr.s.r })];
+          if (h) {
+            h.s = h.s || {};
+            h.s.font = { ...(h.s.font || {}), bold: true, color: { rgb: 'FFFFFFFF' } };
+            h.s.fill = { patternType: 'solid', fgColor: { rgb: 'FF6366F1' } };
+            h.s.alignment = { horizontal: 'center' };
+          }
         }
-        for (let R = rng3.s.r + 1; R <= rng3.e.r; ++R) {
-          const cell = ss[XLSX.utils.encode_cell({ c: rng3.s.c + 1, r: R })];
-          if (cell) { cell.t = 'n'; cell.v = Number(cell.v || 0); cell.z = '₹#,##0'; }
+
+        // compute column widths
+        const maxLens = [];
+        for (let C = rr.s.c; C <= rr.e.c; ++C) {
+          for (let R = rr.s.r; R <= rr.e.r; ++R) {
+            const cell = ss[XLSX.utils.encode_cell({ c: C, r: R })];
+            if (!cell) continue;
+            const len = String(cell.v || '').length;
+            maxLens[C] = Math.max(maxLens[C] || 0, len);
+          }
         }
-        ss['!cols'] = [{ wch: 24 }, { wch: 14 }];
-      } catch (e) { console.warn('summary format:', e); }
+        ss['!cols'] = [];
+        for (let C = rr.s.c; C <= rr.e.c; ++C) ss['!cols'].push({ wch: Math.max(8, Math.min(36, (maxLens[C] || 8) + 2)) });
+
+        // format cells with borders, alternating colors, and alignment
+        const thinBorder3 = { style: 'thin', color: { rgb: 'FFD3D3D3' } };
+        const borders3 = { left: thinBorder3, right: thinBorder3, top: thinBorder3, bottom: thinBorder3 };
+        for (let R = rr.s.r; R <= rr.e.r; ++R) {
+          for (let C = rr.s.c; C <= rr.e.c; ++C) {
+            const cellRef = XLSX.utils.encode_cell({ c: C, r: R });
+            const cell = ss[cellRef];
+            if (!cell) continue;
+            cell.s = cell.s || {};
+            cell.s.border = borders3;
+            if (R > rr.s.r && R % 2 === 0) {
+              cell.s.fill = { patternType: 'solid', fgColor: { rgb: 'FFF5F5F5' } };
+            }
+            
+            if (R > rr.s.r) {
+              const metricCell = ss[XLSX.utils.encode_cell({ c: rr.s.c, r: R })];
+              const metric = metricCell ? String(metricCell.v || '').toLowerCase() : '';
+              if (metric.includes('total') || metric.includes('bank') || metric.includes('income')) {
+                cell.t = 'n';
+                cell.v = Number(cell.v || 0);
+                cell.z = '₹#,##0.00';
+                cell.s.alignment = { horizontal: 'right', vertical: 'center' };
+              } else if (metric.includes('rate') || metric.includes('%')) {
+                cell.t = 'n';
+                cell.v = Number(cell.v || 0);
+                cell.z = '0';
+                cell.s.alignment = { horizontal: 'right', vertical: 'center' };
+              } else {
+                cell.s.alignment = { horizontal: 'right', vertical: 'center' };
+              }
+            } else {
+              cell.s.alignment = { horizontal: 'center', vertical: 'center' };
+            }
+          }
+        }
+        ss['!rows'] = ss['!rows'] || [];
+        ss['!rows'][rr.s.r] = { hpx: 30 };
+        for (let R = rr.s.r + 1; R <= rr.e.r; ++R) ss['!rows'][R] = { hpx: 25 };
+
+        // hide rows after data for compactness
+        const lastRow = rr.e.r;
+        for (let rrn = lastRow + 1; rrn <= lastRow + 200; ++rrn) ss['!rows'][rrn] = { hidden: true };
+      } catch (e) { console.warn('Summary styling skipped', e); }
       XLSX.utils.book_append_sheet(wb, ss, "Summary");
+
+      console.debug('[export] Created Entries, Category Totals, Summary sheets');
       const filename = `budget-analytics-${today()}.xlsx`;
       XLSX.writeFile(wb, filename);
-      showNotif(`Exported to ${filename}`);
+      showNotif(`Exported analytics to ${filename}`);
     } catch (err) {
-      console.error(err);
-      showNotif("Export failed", "error");
+      console.error('[export] Failed:', err);
+      showNotif("Failed to export analytics", "error");
     }
   }, [entries, categoryTotals, totalExpenses, thisMonthTotal, thisWeekTotal, bankBalance, incomes, savingsRate]);
 

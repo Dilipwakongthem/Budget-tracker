@@ -1,0 +1,102 @@
+  const exportToExcel = useCallback(() => {
+    try {
+      const wb = XLSX.utils.book_new();
+
+      // Entries sheet
+      const entriesSheetData = entries.map(e => {
+        const base = { id: e.id, date: e.date, note: e.note || "", total: Number(e.total || 0) };
+        EXPENSE_CATEGORIES.forEach(c => { base[c.label] = Number(parseFloat(e[c.key] || 0) || 0); });
+        if (e.subList) base.subscriptions = JSON.stringify(e.subList);
+        if (e.otherList) base.otherItems = JSON.stringify(e.otherList);
+        return base;
+      });
+      const es = XLSX.utils.json_to_sheet(entriesSheetData);
+      applyBasicFormatting(es, EXPENSE_CATEGORIES);
+      XLSX.utils.book_append_sheet(wb, es, "Entries");
+
+      // Category Totals
+      const categoryRows = EXPENSE_CATEGORIES.map(c => ({ Category: c.label, Total: Number(categoryTotals[c.key] || 0) }));
+      const cs = XLSX.utils.json_to_sheet(categoryRows);
+      applyBasicFormatting(cs, null, true);
+      XLSX.utils.book_append_sheet(wb, cs, "Category Totals");
+
+      // Summary
+      const summary = [
+        { Metric: "Total Expenses", Value: totalExpenses },
+        { Metric: "This Month Total", Value: thisMonthTotal },
+        { Metric: "This Week Total", Value: thisWeekTotal },
+        { Metric: "Bank Balance", Value: bankBalance || 0 },
+        { Metric: "Income (sum)", Value: incomes.reduce((s, it) => s + (parseFloat(it.amount) || 0), 0) },
+        { Metric: "Savings Rate (%)", Value: savingsRate },
+        { Metric: "Total Entries", Value: entries.length },
+      ];
+      const ss = XLSX.utils.json_to_sheet(summary);
+      applyBasicFormatting(ss);
+      XLSX.utils.book_append_sheet(wb, ss, "Summary");
+
+      const filename = `budget-analytics-${today()}.xlsx`;
+      XLSX.writeFile(wb, filename);
+      showNotif(`Exported to ${filename}`);
+    } catch (err) {
+      console.error(err);
+      showNotif("Export failed", "error");
+    }
+  }, [entries, categoryTotals, totalExpenses, thisMonthTotal, thisWeekTotal, bankBalance, incomes, savingsRate]);
+
+  // Helper to apply simple, safe formatting
+  const applyBasicFormatting = (sheet, categories = null, isCurrency = false) => {
+    try {
+      const range = XLSX.utils.decode_range(sheet['!ref']);
+      const headers = [];
+      const widths = [];
+
+      // Format headers
+      for (let C = range.s.c; C <= range.e.c; ++C) {
+        const cell = sheet[XLSX.utils.encode_cell({ c: C, r: range.s.r })];
+        if (cell) {
+          headers.push(String(cell.v || ''));
+          cell.s = { font: { bold: true, color: { rgb: 'FFFFFFFF' } }, fill: { patternType: 'solid', fgColor: { rgb: 'FF6366F1' } }, alignment: { horizontal: 'center' } };
+          widths[C] = String(cell.v || '').length;
+        }
+      }
+
+      // Format data rows
+      const catSet = categories ? new Set(categories.map(c => c.label)) : new Set();
+      for (let R = range.s.r + 1; R <= range.e.r; ++R) {
+        for (let C = range.s.c; C <= range.e.c; ++C) {
+          const cellRef = XLSX.utils.encode_cell({ c: C, r: R });
+          const cell = sheet[cellRef];
+          if (!cell) continue;
+          
+          widths[C] = Math.max(widths[C] || 0, String(cell.v || '').length);
+          const hdr = headers[C - range.s.c] || '';
+
+          // Format dates
+          if (hdr === 'date' || hdr.toLowerCase().includes('date')) {
+            if (typeof cell.v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(cell.v)) {
+              cell.t = 'd';
+              cell.z = 'yyyy-mm-dd';
+            }
+          }
+          // Format currency
+          else if (hdr === 'total' || hdr === 'Total' || catSet.has(hdr) || isCurrency) {
+            cell.t = 'n';
+            cell.v = Number(cell.v || 0);
+            cell.z = '₹#,##0';
+          }
+        }
+      }
+
+      // Set widths and hide rows
+      sheet['!cols'] = widths.map(w => ({ wch: Math.max(10, Math.min(28, (w || 10) + 2)) }));
+      sheet['!rows'] = [];
+      for (let r = range.e.r + 1; r <= range.e.r + 200; ++r) {
+        sheet['!rows'][r] = { hidden: true };
+      }
+
+      // Freeze header
+      if (range.e.r > range.s.r) sheet['!freeze'] = { xSplit: 0, ySplit: 1 };
+    } catch (e) {
+      console.warn('Formatting skipped:', e);
+    }
+  };
