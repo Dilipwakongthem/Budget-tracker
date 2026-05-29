@@ -29,6 +29,7 @@ const EXPENSE_CATEGORIES = [
   { key: "insurance", label: "Insurance", icon: "🛡️", color: "#0ea5e9" },
   { key: "medical", label: "Medical / Health", icon: "🏥", color: "#f97316" },
   { key: "education", label: "Education", icon: "📚", color: "#a855f7" },
+  { key: "luxury", label: "Luxury / Fashion", icon: "👗", color: "#ec4899" },
   { key: "entertainment", label: "Entertainment", icon: "🎬", color: "#fb7185" },
   { key: "utilities", label: "Utilities", icon: "⚡", color: "#fbbf24" },
   { key: "other", label: "Other", icon: "📦", color: "#94a3b8" },
@@ -106,6 +107,11 @@ export default function BudgetTracker() {
   const [notification, setNotification] = useState(null);
   const [editingBalance, setEditingBalance] = useState(false);
   const [tempBalance, setTempBalance] = useState("");
+  const [addingMoney, setAddingMoney] = useState(false);
+  const [addMoneyForm, setAddMoneyForm] = useState({ source: "loan_repayment", amount: "", date: today(), note: "" });
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
+  const [quickAddForm, setQuickAddForm] = useState({ date: today(), category: "food", amount: "", note: "", cardType: "debit" });
+  const [expenseCardType, setExpenseCardType] = useState("debit");
 
   const showNotif = (msg, type = "success") => {
     setNotification({ msg, type });
@@ -162,7 +168,11 @@ export default function BudgetTracker() {
   }, [incomes]); // Re-check when incomes list changes
 
   const totalExpenses = useMemo(() => {
-    return entries.reduce((sum, e) => sum + (e.total || 0), 0);
+    return entries.reduce((sum, e) => sum + (e.cardType === "credit" ? 0 : (e.total || 0)), 0);
+  }, [entries]);
+
+  const totalCreditCardExpenses = useMemo(() => {
+    return entries.reduce((sum, e) => sum + (e.cardType === "credit" ? (e.total || 0) : 0), 0);
   }, [entries]);
 
   const balance = useMemo(() => {
@@ -172,14 +182,14 @@ export default function BudgetTracker() {
 
   const thisMonthEntries = useMemo(() => {
     const m = getMonth(today());
-    return entries.filter(e => getMonth(e.date) === m);
+    return entries.filter(e => getMonth(e.date) === m && e.cardType !== "credit");
   }, [entries]);
 
   const thisMonthTotal = useMemo(() => thisMonthEntries.reduce((s, e) => s + e.total, 0), [thisMonthEntries]);
 
   const thisWeekEntries = useMemo(() => {
     const w = getWeek(today());
-    return entries.filter(e => getWeek(e.date) >= w);
+    return entries.filter(e => getWeek(e.date) >= w && e.cardType !== "credit");
   }, [entries]);
 
   const thisWeekTotal = useMemo(() => thisWeekEntries.reduce((s, e) => s + e.total, 0), [thisWeekEntries]);
@@ -188,7 +198,9 @@ export default function BudgetTracker() {
     const totals = {};
     EXPENSE_CATEGORIES.forEach(c => { totals[c.key] = 0; });
     entries.forEach(e => {
-      EXPENSE_CATEGORIES.forEach(c => { totals[c.key] += parseFloat(e[c.key] || 0); });
+      if (e.cardType !== "credit") {
+        EXPENSE_CATEGORIES.forEach(c => { totals[c.key] += parseFloat(e[c.key] || 0); });
+      }
     });
     return totals;
   }, [entries]);
@@ -201,9 +213,10 @@ export default function BudgetTracker() {
   }, [categoryTotals]);
 
   const chartData = useMemo(() => {
+    const filteredEntries = entries.filter(e => e.cardType !== "credit");
     if (chartView === "monthly") {
       const byMonth = {};
-      entries.forEach(e => {
+      filteredEntries.forEach(e => {
         const m = getMonth(e.date);
         byMonth[m] = (byMonth[m] || 0) + e.total;
       });
@@ -213,7 +226,7 @@ export default function BudgetTracker() {
       }));
     } else if (chartView === "weekly") {
       const byWeek = {};
-      entries.forEach(e => {
+      filteredEntries.forEach(e => {
         const w = getWeek(e.date);
         byWeek[w] = (byWeek[w] || 0) + e.total;
       });
@@ -223,7 +236,7 @@ export default function BudgetTracker() {
       }));
     } else {
       const byDay = {};
-      entries.forEach(e => { byDay[e.date] = (byDay[e.date] || 0) + e.total; });
+      filteredEntries.forEach(e => { byDay[e.date] = (byDay[e.date] || 0) + e.total; });
       return Object.entries(byDay).sort().slice(-30).map(([k, v]) => ({
         label: new Date(k).toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
         amount: Math.round(v)
@@ -246,14 +259,15 @@ export default function BudgetTracker() {
     let total = 0;
     EXPENSE_CATEGORIES.forEach(c => { total += parseFloat(form[c.key] || 0); });
     if (total === 0) { showNotif("Please enter at least one expense amount", "error"); return; }
-    const entry = { ...form, total, id: Date.now(), subName: form.subName, otherName: form.otherName };
+    const entry = { ...form, total, id: Date.now(), subName: form.subName, otherName: form.otherName, cardType: expenseCardType };
     setEntries(prev => [entry, ...prev]);
     setExpenseForm({ ...initialExpenses, subName: "", otherName: "", date: today(), note: "", subList: [], otherList: [] });
     setTempSub({ name: "", amount: "" });
     setTempOther({ name: "", amount: "" });
+    setExpenseCardType("debit");
     showNotif(`Entry of ${fmt(total)} added successfully`);
     setActiveTab("Dashboard");
-  }, [expenseForm]);
+  }, [expenseForm, expenseCardType]);
 
   const deleteEntry = (id) => {
     setEntries(prev => prev.filter(e => e.id !== id));
@@ -264,7 +278,7 @@ export default function BudgetTracker() {
     try {
       const wb = XLSX.utils.book_new();
       const entriesSheetData = entries.map(e => {
-        const base = { date: e.date, note: e.note || "", total: Number(e.total || 0) };
+        const base = { date: e.date, note: e.note || "", cardType: e.cardType || "debit", total: Number(e.total || 0) };
         EXPENSE_CATEGORIES.forEach(c => { base[c.label] = Number(parseFloat(e[c.key] || 0) || 0); });
         return base;
       });
@@ -307,7 +321,8 @@ export default function BudgetTracker() {
       } catch (e) { console.warn('category format:', e); }
       XLSX.utils.book_append_sheet(wb, cs, "Category Totals");
       const summary = [
-        { Metric: "Total Expenses", Value: totalExpenses },
+        { Metric: "Total Expenses (Debit)", Value: totalExpenses },
+        { Metric: "Total Credit Card Charges", Value: totalCreditCardExpenses },
         { Metric: "This Month Total", Value: thisMonthTotal },
         { Metric: "This Week Total", Value: thisWeekTotal },
         { Metric: "Bank Balance", Value: bankBalance || 0 },
@@ -336,7 +351,7 @@ export default function BudgetTracker() {
       console.error(err);
       showNotif("Export failed", "error");
     }
-  }, [entries, categoryTotals, totalExpenses, thisMonthTotal, thisWeekTotal, bankBalance, incomes, savingsRate]);
+  }, [entries, categoryTotals, totalExpenses, totalCreditCardExpenses, thisMonthTotal, thisWeekTotal, bankBalance, incomes, savingsRate]);
 
   const income = incomes.reduce((s, it) => s + (parseFloat(it.amount) || 0), 0);
   const budgetUsed = income > 0 ? Math.min((thisMonthTotal / income) * 100, 100) : 0;
@@ -438,9 +453,41 @@ export default function BudgetTracker() {
                           <button className="btn-primary" aria-label="Save bank balance" style={{ padding: "9px 14px", whiteSpace: "nowrap" }} onClick={() => { setBankBalance(tempBalance); setEditingBalance(false); showNotif("Balance updated"); }}>Save</button>
                         </div>
                       ) : (
-                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
                           <div style={{ flex: 1, padding: "9px 12px", borderRadius: 8, background: "var(--color-background-secondary)", fontSize: 16, fontWeight: 700, color: "var(--color-text-primary)", fontFamily: "'DM Mono', monospace", textAlign: 'left' }}>{bankBalance ? fmt(bankBalance) : "Not set"}</div>
                           <button className="btn-sm" aria-label="Edit bank balance" onClick={() => { setTempBalance(bankBalance); setEditingBalance(true); }}>Edit</button>
+                        </div>
+                      )}
+                      {!editingBalance && (
+                        <button className="btn-sm" aria-label="Add money from other sources" onClick={() => setAddingMoney(true)} style={{ width: '100%' }}>+ Add Money</button>
+                      )}
+                      {addingMoney && !editingBalance && (
+                        <div style={{ marginTop: 12, padding: 12, borderRadius: 8, background: "var(--color-background-secondary)" }}>
+                          <label style={{ display: 'block', marginBottom: 8 }}>Source</label>
+                          <select className="inp" aria-label="Money source" value={addMoneyForm.source} onChange={e => setAddMoneyForm(f => ({ ...f, source: e.target.value }))} style={{ marginBottom: 8 }}>
+                            <option value="loan_repayment">Loan Repayment</option>
+                            <option value="gift">Gift</option>
+                            <option value="refund">Refund</option>
+                            <option value="transfer">Transfer</option>
+                            <option value="other">Other</option>
+                          </select>
+                          <label style={{ display: 'block', marginBottom: 8 }}>Amount (₹)</label>
+                          <input className="inp" aria-label="Amount to add" type="number" placeholder="0" value={addMoneyForm.amount} onChange={e => setAddMoneyForm(f => ({ ...f, amount: e.target.value }))} style={{ marginBottom: 8 }} />
+                          <label style={{ display: 'block', marginBottom: 8 }}>Date</label>
+                          <input className="inp" aria-label="Date" type="date" value={addMoneyForm.date} onChange={e => setAddMoneyForm(f => ({ ...f, date: e.target.value }))} style={{ marginBottom: 8 }} />
+                          <label style={{ display: 'block', marginBottom: 8 }}>Note (optional)</label>
+                          <input className="inp" aria-label="Note" type="text" placeholder="e.g., loan repayment from friend" value={addMoneyForm.note} onChange={e => setAddMoneyForm(f => ({ ...f, note: e.target.value }))} style={{ marginBottom: 8 }} />
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            <button className="btn-primary" onClick={() => {
+                              if (!addMoneyForm.amount) return showNotif('Enter amount', 'error');
+                              const amount = parseFloat(addMoneyForm.amount) || 0;
+                              setBankBalance(prev => String((parseFloat(prev) || 0) + amount));
+                              showNotif(`Added ₹${fmt(amount)} from ${addMoneyForm.source.replace('_', ' ')}`);
+                              setAddingMoney(false);
+                              setAddMoneyForm({ source: 'loan_repayment', amount: '', date: today(), note: '' });
+                            }} style={{ flex: 1 }}>Save</button>
+                            <button className="btn-sm" onClick={() => { setAddingMoney(false); setAddMoneyForm({ source: 'loan_repayment', amount: '', date: today(), note: '' }); }} style={{ flex: 1 }}>Cancel</button>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -458,7 +505,7 @@ export default function BudgetTracker() {
                         <div style={{ flex: 1 }} />
                       </div>
 
-                      <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                      <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
                         <select className="inp" aria-label="Income type" style={{ width: 'auto', minWidth: 110 }} value={incomeForm.type} onChange={e => setIncomeForm(f => ({ ...f, type: e.target.value }))}>
                           <option value="salary">Salary</option>
                           <option value="freelance">Freelance</option>
@@ -630,6 +677,19 @@ export default function BudgetTracker() {
             <p className="section-title">New Expense Entry</p>
 
             <div style={{ marginBottom: 16 }}>
+              <label>Payment Method</label>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <button onClick={() => setExpenseCardType("debit")} style={{ flex: 1, padding: '10px 14px', borderRadius: 8, border: expenseCardType === "debit" ? '2px solid #6366f1' : '1px solid var(--color-border-secondary)', background: expenseCardType === "debit" ? 'rgba(99,102,241,0.1)' : 'var(--color-background-secondary)', color: 'var(--color-text-primary)', fontWeight: 500, cursor: 'pointer', transition: 'all 0.2s' }} aria-pressed={expenseCardType === "debit"}>💳 Debit Card</button>
+                <button onClick={() => setExpenseCardType("credit")} style={{ flex: 1, padding: '10px 14px', borderRadius: 8, border: expenseCardType === "credit" ? '2px solid #6366f1' : '1px solid var(--color-border-secondary)', background: expenseCardType === "credit" ? 'rgba(99,102,241,0.1)' : 'var(--color-background-secondary)', color: 'var(--color-text-primary)', fontWeight: 500, cursor: 'pointer', transition: 'all 0.2s' }} aria-pressed={expenseCardType === "credit"}>💰 Credit Card</button>
+              </div>
+              {expenseCardType === "credit" && (
+                <div style={{ marginTop: 8, padding: 10, borderRadius: 8, background: 'rgba(251,191,36,0.08)', fontSize: 13, color: '#92400e' }}>
+                  ℹ️ Credit card charges won't be deducted from bank balance and won't count in spending analytics until paid.
+                </div>
+              )}
+            </div>
+
+            <div style={{ marginBottom: 16 }}>
               <label>Entry Date</label>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 <input ref={expenseDateRef} className="inp" aria-label="Entry date" type="date" value={expenseForm.date} onChange={e => setExpenseForm(p => ({ ...p, date: e.target.value }))} onClick={() => expenseDateRef.current?.showPicker?.()} onFocus={() => expenseDateRef.current?.showPicker?.()} />
@@ -694,7 +754,7 @@ export default function BudgetTracker() {
 
             <p className="section-title" style={{ marginBottom: 14 }}>Savings & Wellbeing</p>
             <div className="expense-row" style={{ marginBottom: 16 }}>
-              {EXPENSE_CATEGORIES.slice(8, 14).map(c => (
+              {EXPENSE_CATEGORIES.slice(8, 15).map(c => (
                 <div key={c.key}>
                   <label>{c.icon} {c.label}</label>
                   <input className="inp" aria-label={`Amount for ${c.label}`} type="number" placeholder="0" value={expenseForm[c.key]} onChange={e => setExpenseForm(p => ({ ...p, [c.key]: e.target.value }))} />
@@ -764,6 +824,79 @@ export default function BudgetTracker() {
           </div>
         )}
 
+        {/* QUICK ADD MODAL */}
+        {quickAddOpen && (
+          <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 999, padding: '16px' }}>
+            <div className="card" style={{ maxWidth: 600, width: '100%', maxHeight: '90vh', overflowY: 'auto' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <h2 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>⚡ Quick Add</h2>
+                <button onClick={() => setQuickAddOpen(false)} style={{ background: 'none', border: 'none', fontSize: 24, cursor: 'pointer', color: 'var(--color-text-secondary)' }} aria-label="Close quick add">×</button>
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label>Payment Method</label>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <button onClick={() => setQuickAddForm(f => ({ ...f, cardType: "debit" }))} style={{ flex: 1, padding: '10px 14px', borderRadius: 8, border: quickAddForm.cardType === "debit" ? '2px solid #6366f1' : '1px solid var(--color-border-secondary)', background: quickAddForm.cardType === "debit" ? 'rgba(99,102,241,0.1)' : 'var(--color-background-secondary)', color: 'var(--color-text-primary)', fontWeight: 500, cursor: 'pointer', transition: 'all 0.2s' }} aria-pressed={quickAddForm.cardType === "debit"}>💳 Debit</button>
+                  <button onClick={() => setQuickAddForm(f => ({ ...f, cardType: "credit" }))} style={{ flex: 1, padding: '10px 14px', borderRadius: 8, border: quickAddForm.cardType === "credit" ? '2px solid #6366f1' : '1px solid var(--color-border-secondary)', background: quickAddForm.cardType === "credit" ? 'rgba(99,102,241,0.1)' : 'var(--color-background-secondary)', color: 'var(--color-text-primary)', fontWeight: 500, cursor: 'pointer', transition: 'all 0.2s' }} aria-pressed={quickAddForm.cardType === "credit"}>💰 Credit</button>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label>Date</label>
+                <input className="inp" type="date" value={quickAddForm.date} onChange={e => setQuickAddForm(f => ({ ...f, date: e.target.value }))} />
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label>Category</label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(70px, 1fr))', gap: 8 }}>
+                  {EXPENSE_CATEGORIES.map(c => (
+                    <button key={c.key} onClick={() => setQuickAddForm(f => ({ ...f, category: c.key }))} style={{ padding: 12, borderRadius: 8, border: quickAddForm.category === c.key ? `2px solid ${c.color}` : '1px solid var(--color-border-secondary)', background: quickAddForm.category === c.key ? `${c.color}18` : 'var(--color-background-secondary)', cursor: 'pointer', fontSize: 20, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, fontFamily: 'inherit', transition: 'all 0.2s' }}>
+                      <span>{c.icon}</span>
+                      <span style={{ fontSize: 10, color: 'var(--color-text-secondary)', fontWeight: 500, textAlign: 'center' }}>{c.label.split('/')[0]}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label>Amount (₹)</label>
+                <input className="inp" type="number" placeholder="0" value={quickAddForm.amount} onChange={e => setQuickAddForm(f => ({ ...f, amount: e.target.value }))} autoFocus />
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label>Note (optional)</label>
+                <input className="inp" type="text" placeholder="e.g., lunch at office..." value={quickAddForm.note} onChange={e => setQuickAddForm(f => ({ ...f, note: e.target.value }))} />
+              </div>
+
+              <button className="btn-primary" onClick={() => {
+                if (!quickAddForm.amount) return showNotif('Enter amount', 'error');
+                const amount = parseFloat(quickAddForm.amount) || 0;
+                const category = EXPENSE_CATEGORIES.find(c => c.key === quickAddForm.category);
+                const entry = {
+                  ...initialExpenses,
+                  [quickAddForm.category]: String(amount),
+                  date: quickAddForm.date,
+                  note: quickAddForm.note,
+                  total: amount,
+                  id: Date.now(),
+                  subList: [],
+                  otherList: [],
+                  cardType: quickAddForm.cardType
+                };
+                setEntries(prev => [entry, ...prev]);
+                showNotif(`Added ${fmt(amount)} to ${category?.label}`);
+                setQuickAddOpen(false);
+                setQuickAddForm({ date: today(), category: 'food', amount: '', note: '', cardType: 'debit' });
+              }} style={{ width: '100%', padding: 13, fontSize: 15 }}>
+                Save Expense
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Quick Add FAB - visible on all tabs */}
+        <button onClick={() => setQuickAddOpen(true)} style={{ position: 'fixed', bottom: 20, right: 20, width: 56, height: 56, borderRadius: '50%', background: '#6366f1', color: 'white', border: 'none', fontSize: 28, cursor: 'pointer', boxShadow: '0 4px 12px rgba(99,102,241,0.3)', zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s', fontFamily: 'inherit' }} onMouseEnter={e => e.target.style.background = '#4f46e5'} onMouseLeave={e => e.target.style.background = '#6366f1'} aria-label="Quick add expense">+</button>
+
         {/* HISTORY */}
         {activeTab === "History" && (
           <div>
@@ -787,6 +920,7 @@ export default function BudgetTracker() {
                           <span style={{ fontSize: 12, color: "var(--color-text-secondary)" }}>
                             {new Date(e.date).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
                           </span>
+                          <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: e.cardType === 'credit' ? 'rgba(251,191,36,0.2)' : 'rgba(16,185,129,0.2)', color: e.cardType === 'credit' ? '#92400e' : '#047857', fontWeight: 500 }}>{e.cardType === 'credit' ? '💳 Credit' : '💰 Debit'}</span>
                           {e.note && <span style={{ fontSize: 12, color: "var(--color-text-secondary)", fontStyle: "italic" }}>— {e.note}</span>}
                         </div>
                         <div style={{ flexWrap: "wrap", display: "flex" }}>
